@@ -1,10 +1,33 @@
 defmodule EctoEnum do
   @moduledoc """
-  Provides `defenum/2` macro for defining an Enum Ecto type.
+  Provides `defenum/2` and `defenum/3` macro for defining an Enum Ecto type.
+
+  This module can also be `use`d to create an Ecto Enum like:
+
+      defmodule CustomEnum do
+        use EctoEnum, ready: 0, set: 1, go: 2
+      end
+
+  Or in place of using `EctoEnum.Postgres` like:
+
+      defmodule PostgresType do
+        use EctoEnum, type: :new_type, enums: [:ready, :set, :go]
+      end
+
+  The difference between the above two examples is that the previous one would use an
+  integer column in the database while the latter one would use a custom type in PostgreSQL.
+
+  Note that only PostgreSQL is supported for custom data types at the moment.
   """
 
   @doc """
   Defines an enum custom `Ecto.Type`.
+
+  For second argument, it accepts either a list of strings or a keyword list with keyword
+  values that are either strings or integers. Below are examples of a valid argument:
+      [registered: 0, active: 1, inactive: 2, archived: 3]
+      [registered: "registered", active: "active", inactive: "inactive", archived: "archived"]
+      ["registered", "active", "inactive", "archived"]
 
   It can be used like any other `Ecto.Type` by passing it to a field in your model's
   schema block. For example:
@@ -13,7 +36,7 @@ defmodule EctoEnum do
       defenum StatusEnum, registered: 0, active: 1, inactive: 2, archived: 3
 
       defmodule User do
-        use Ecto.Model
+        use Ecto.Schema
 
         schema "users" do
           field :status, StatusEnum
@@ -58,82 +81,67 @@ defmodule EctoEnum do
       [registered: 0, active: 1, inactive: 2, archived: 3]
   """
 
-  defmacro defenum(module, type, enum) do
-    EctoEnum.Postgres.defenum(module, type, enum)
-  end
-
-  defmacro defenum(module, enum) do
+  defmacro __using__(opts) do
     quote do
-      kw = unquote(enum) |> Macro.escape
+      opts = unquote(opts)
 
-      defmodule unquote(module) do
-        @behaviour Ecto.Type
-
-        @atom_int_kw kw
-        @int_atom_map for {atom, int} <- kw, into: %{}, do: {int, atom}
-        @string_int_map for {atom, int} <- kw, into: %{}, do: {Atom.to_string(atom), int}
-        @string_atom_map for {atom, int} <- kw, into: %{}, do: {Atom.to_string(atom), atom}
-        @valid_values Keyword.values(@atom_int_kw) ++ Keyword.keys(@atom_int_kw) ++ Map.keys(@string_int_map)
-
-        def type, do: :integer
-
-        def cast(term) do
-          EctoEnum.cast(term, @int_atom_map, @string_atom_map)
-        end
-
-        def load(int) when is_integer(int) do
-          Map.fetch(@int_atom_map, int)
-        end
-
-        def dump(term) do
-          case EctoEnum.dump(term, @atom_int_kw, @string_int_map, @int_atom_map) do
-            :error ->
-              msg = "`#{inspect term}` is not a valid enum value for `#{inspect __MODULE__}`. " <>
-                "Valid enum values are `#{inspect __valid_values__()}`"
-              raise Ecto.ChangeError,
-                message: msg
-            value ->
-              value
-          end
-        end
-
-        # Reflection
-        def __enum_map__(), do: @atom_int_kw
-        def __valid_values__(), do: @valid_values
+      if opts[:type] && opts[:enums] do
+        use EctoEnum.Postgres.Use, unquote(opts)
+      else
+        use EctoEnum.Use, unquote(opts)
       end
     end
   end
 
-  @spec cast(any, map, map) :: {:ok, atom} | :error
-  def cast(atom, int_atom_map, _) when is_atom(atom) do
-    if atom in Map.values(int_atom_map) do
-      {:ok, atom}
-    else
-      :error
+  defmacro defenum(module, type, enum, options \\ []) do
+    EctoEnum.Postgres.defenum(module, type, enum, options)
+  end
+
+  defmacro defenum(module, enum) do
+    quote do
+      enum = Macro.escape(unquote(enum))
+      [h | _t] = enum
+
+      enum =
+        cond do
+          Keyword.keyword?(enum) ->
+            enum
+
+          is_binary(h) ->
+            Enum.map(enum, fn value -> {String.to_atom(value), value} end)
+
+          true ->
+            raise "Enum must be a keyword list or a list of strings"
+        end
+
+      defmodule unquote(module) do
+        use EctoEnum.Use, enum
+      end
     end
   end
-  def cast(string, _, string_atom_map) when is_binary(string) do
-    Map.fetch(string_atom_map, string)
-  end
-  def cast(int, int_atom_map, _) when is_integer(int) do
-    Map.fetch(int_atom_map, int)
-  end
-  def cast(_, _, _), do: :error
 
+  alias Ecto.Changeset
 
-  @spec dump(any, [{atom(), any()}], map, map) :: {:ok, integer} | :error
-  def dump(integer, _, _, int_atom_map) when is_integer(integer) do
-    if int_atom_map[integer] do
-      {:ok, integer}
-    else
-      :error
-    end
+  @spec validate_enum(
+          Ecto.Changeset.t(),
+          atom,
+          (atom, String.t(), list(String.t() | integer | atom) -> String.t())
+        ) :: Ecto.Changeset.t()
+  def validate_enum(changeset, field, error_msg \\ &default_error_msg/3) do
+    Changeset.validate_change(changeset, field, :validate_enum, fn field, value ->
+      type = changeset.types[field]
+      error_msg = error_msg.(field, value, type.__valid_values__())
+
+      if type.valid_value?(value) do
+        []
+      else
+        Keyword.put([], field, error_msg)
+      end
+    end)
   end
-  def dump(atom, atom_int_kw, _, _) when is_atom(atom) do
-    Keyword.fetch(atom_int_kw, atom)
+
+  defp default_error_msg(field, value, valid_values) do
+    "Value `#{inspect(value)}` is not a valid enum for `#{inspect(field)}` field. " <>
+      "Valid enums are `#{inspect(valid_values)}`"
   end
-  def dump(string, _, string_int_map, _) when is_binary(string) do
-    Map.fetch(string_int_map, string)
-  end
-  def dump(_), do: :error
 end

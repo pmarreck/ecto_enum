@@ -1,8 +1,8 @@
 EctoEnum
 ========
 
-[![Hex.pm version](https://img.shields.io/hexpm/v/ecto_enum.svg?style=flat)](https://hex.pm/packages/ecto_enum) 
-[![Hex.pm downloads](https://img.shields.io/hexpm/dt/ecto_enum.svg?style=flat)](https://hex.pm/packages/ecto_enum) 
+[![Hex.pm version](https://img.shields.io/hexpm/v/ecto_enum.svg?style=flat)](https://hex.pm/packages/ecto_enum)
+[![Hex.pm downloads](https://img.shields.io/hexpm/dt/ecto_enum.svg?style=flat)](https://hex.pm/packages/ecto_enum)
 [![Inline docs](http://inch-ci.org/github/gjaldon/ecto_enum.svg?branch=master)](http://inch-ci.org/github/gjaldon/ecto_enum)
 [![Build Status](https://travis-ci.org/gjaldon/ecto_enum.svg?branch=master)](https://travis-ci.org/gjaldon/ecto_enum)
 
@@ -14,9 +14,15 @@ First, we add `ecto_enum` to `mix.exs`:
 
 ```elixir
 def deps do
-  [{:ecto_enum, "~> 1.0"}]
+  [
+    {:ecto_enum, "~> 1.3"}
+  ]
 end
 ```
+
+Run `mix deps.get` to install `ecto_enum`.
+
+### Creating an Ecto Enum with `defenum/2` macro
 
 We will then have to define our enum. We can do this in a separate file since defining
 an enum is just defining a module. We do it like:
@@ -28,12 +34,20 @@ import EctoEnum
 defenum StatusEnum, registered: 0, active: 1, inactive: 2, archived: 3
 ```
 
+Note that we can also use string-backed enums by doing the following:
+
+```elixir
+defenum StatusEnum, registered: "registered", active: "active", inactive: "active", archived: "archived"
+# short-cut way of using string-backed enums
+defenum StatusEnum, "registered", "active", "active", "archived"
+```
+
 Once defined, `EctoEnum` can be used like any other `Ecto.Type` by passing it to a field
 in your model's schema block. For example:
 
 ```elixir
 defmodule User do
-  use Ecto.Model
+  use Ecto.Schema
 
   schema "users" do
     field :status, StatusEnum
@@ -61,10 +75,47 @@ iex> from(u in User, where: u.status == ^:registered) |> Repo.all() |> length
 
 Passing a value that the custom Enum type does not recognize will result in an error.
 
+### Creating an Ecto Enum by `use`ing `EctoEnum`
+
+Another way to create an Ecto Enum is by `use`ing the `EctoEnum` or the `EctoEnum.Postgres`
+modules.
+
+To `use` `EctoEnum` with integer-backed storage:
+
+```elixir
+defmodule CustomEnum do
+  use EctoEnum, ready: 0, set: 1, go: 2
+end
+```
+
+To `use` `EctoEnum` with string-backed storage:
+
+```elixir
+defmodule CustomEnum do
+  use EctoEnum, "ready", "set", "go"
+end
+```
+
+To `use` `EctoEnum` with Postgres user-defined types:
+
+```elixir
+defmodule PostgresType do
+  use EctoEnum, type: :new_type, enums: [:ready, :set, :go]
+end
+```
+
+We can also `use` `EctoEnum.Postgres` directly like:
+
+```elixir
+defmodule NewType do
+  use EctoEnum.Postgres, type: :new_type, enums: [:ready, :set, :go]
+end
+```
+
 ### Reflection
 
 The enum type `StatusEnum` will also have a reflection function for inspecting the
-enum map in runtime.
+enum map at runtime.
 
 ```elixir
 iex> StatusEnum.__enum_map__()
@@ -72,6 +123,15 @@ iex> StatusEnum.__enum_map__()
 iex> StatusEnum.__valid_values__()
 [0, 1, 2, 3, :registered, :active, :inactive, :archived, "active", "archived",
 "inactive", "registered"]
+```
+
+There is also a helper function that leverages the `__valid_values__()` reflection called `valid_value?(value)`.
+
+```elixir
+iex> StatusEnum.valid_value?(:registered)
+true
+iex> StatusEnum.valid_value?("invalid")
+false
 ```
 
 ### Using Postgres's Enum Type
@@ -86,7 +146,7 @@ import EctoEnum
 defenum StatusEnum, :status, [:registered, :active, :inactive, :archived]
 ```
 
-The second argument is the name you want used for the new type you are creating in Postgres.
+The second argument is the name you want to use for the new type you are creating in Postgres.
 Note that `defenum/3` expects a list of atoms(could be strings) instead of a keyword
 list unlike in `defenum/2`. Another notable difference is that you can no longer
 use integers in place of atoms or strings as values in your enum type. Given the
@@ -99,21 +159,21 @@ above code, this means that you can only pass the following values:
 In your migrations, you can make use of helper functions like:
 
 ```elixir
-def up do
+def change do
   StatusEnum.create_type
   create table(:users_pg) do
-    add :status, :status
+    add :status, StatusEnum.type()
   end
-end
-
-def down do
-  drop table(:users_pg)
-  StatusEnum.drop_type
 end
 ```
 
-`create_type/0` and `drop_type/0` are automatically defined for you in
+`create_type/0`, `type/0` and `drop_type/0` are automatically defined for you in
 your custom Enum module.
+
+You can also create the enum in a different schema:
+```elixir
+defenum StatusEnum, :status, [:registered, :active, :inactive, :archived], schema: "alternative_schema"
+```
 
 ## Important notes/gotchas
 
@@ -124,9 +184,9 @@ your custom Enum module.
 defmodule MyApp.Repo.Migrations.AddToGenderEnum do
   use Ecto.Migration
   @disable_ddl_transaction true
-  
+
   def up do
-    Ecto.Migration.execute "ALTER TYPE gender ADD VALUE 'other'"
+    Ecto.Migration.execute "ALTER TYPE gender ADD VALUE IF NOT EXISTS'other'"
   end
 
   def down do
